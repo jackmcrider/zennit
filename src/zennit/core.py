@@ -23,7 +23,18 @@ from contextlib import contextmanager
 import torch
 
 
-def stabilize(input, epsilon=1e-6):
+class Stabilizer:
+    def __init__(self, epsilon=1e-6, clip=False, norm_scale=False, dim=None):
+        self.epsilon = epsilon
+        self.clip = clip
+        self.norm_scale = norm_scale
+        self.dim = dim
+
+    def __call__(self, input):
+        return stabilize(input, self.epsilon, self.clip, self.norm_scale, self.dim)
+
+
+def stabilize(input, epsilon=1e-6, clip=False, norm_scale=False, dim=None):
     '''Stabilize input for safe division. This shifts zero-elements by ``+ epsilon``. For the sake of the
     *epsilon rule*, this also shifts positive values by ``+ epsilon`` and negative values by ``- epsilon``.
 
@@ -39,7 +50,14 @@ def stabilize(input, epsilon=1e-6):
     :py:obj:`torch.Tensor`
         New Tensor copied from `input` with values shifted by epsilon.
     '''
-    return input + ((input == 0.).to(input) + input.sign()) * epsilon
+    sign = ((input == 0.).to(input) + input.sign())
+    if norm_scale:
+        if dim is None:
+            dim = tuple(range(1, input.ndim))
+        epsilon = epsilon * ((input ** 2).mean(dim=dim) ** .5)
+    if clip:
+        return sign * input.abs().clip(min=epsilon)
+    return input + sign * epsilon
 
 
 def expand(tensor, shape, cut_batch_dim=False):

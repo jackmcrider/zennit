@@ -21,7 +21,7 @@ import torch
 from .core import Composite
 from .layer import Sum
 from .rules import Gamma, Epsilon, ZBox, ZPlus, AlphaBeta, Flat, Pass, Norm, ReLUDeconvNet, ReLUGuidedBackprop
-from .types import Convolution, Linear, AvgPool, Activation
+from .types import Convolution, Linear, AvgPool, Activation, BatchNorm
 
 
 class LayerMapComposite(Composite):
@@ -144,11 +144,13 @@ def register_composite(name):
     return wrapped
 
 
-LAYER_MAP_BASE = [
-    (Activation, Pass()),
-    (Sum, Norm()),
-    (AvgPool, Norm())
-]
+def layer_map_base(epsilon=1e-6):
+    return [
+        (Activation, Pass()),
+        (Sum, Norm(epsilon=epsilon)),
+        (AvgPool, Norm(epsilon=epsilon)),
+        (BatchNorm, Pass()),
+    ]
 
 
 @register_composite('epsilon_gamma_box')
@@ -169,7 +171,7 @@ class EpsilonGammaBox(SpecialFirstLayerMapComposite):
     '''
     def __init__(self, low, high, epsilon=1e-6, gamma=0.25, zero_params=None, canonizers=None):
         rule_kwargs = {'zero_params': zero_params}
-        layer_map = LAYER_MAP_BASE + [
+        layer_map = layer_map_base(epsilon) + [
             (Convolution, Gamma(gamma=gamma, **rule_kwargs)),
             (torch.nn.Linear, Epsilon(epsilon=epsilon, **rule_kwargs)),
         ]
@@ -191,7 +193,7 @@ class EpsilonPlus(LayerMapComposite):
     '''
     def __init__(self, epsilon=1e-6, zero_params=None, canonizers=None):
         rule_kwargs = {'zero_params': zero_params}
-        layer_map = LAYER_MAP_BASE + [
+        layer_map = layer_map_base(epsilon) + [
             (Convolution, ZPlus(**rule_kwargs)),
             (torch.nn.Linear, Epsilon(epsilon=epsilon, **rule_kwargs)),
         ]
@@ -210,7 +212,7 @@ class EpsilonAlpha2Beta1(LayerMapComposite):
     '''
     def __init__(self, epsilon=1e-6, zero_params=None, canonizers=None):
         rule_kwargs = {'zero_params': zero_params}
-        layer_map = LAYER_MAP_BASE + [
+        layer_map = layer_map_base(epsilon) + [
             (Convolution, AlphaBeta(alpha=2, beta=1, **rule_kwargs)),
             (torch.nn.Linear, Epsilon(epsilon=epsilon, **rule_kwargs)),
         ]
@@ -229,7 +231,7 @@ class EpsilonPlusFlat(SpecialFirstLayerMapComposite):
     '''
     def __init__(self, epsilon=1e-6, zero_params=None, canonizers=None):
         rule_kwargs = {'zero_params': zero_params}
-        layer_map = LAYER_MAP_BASE + [
+        layer_map = layer_map_base(epsilon) + [
             (Convolution, ZPlus(**rule_kwargs)),
             (torch.nn.Linear, Epsilon(epsilon=epsilon, **rule_kwargs)),
         ]
@@ -251,7 +253,7 @@ class EpsilonAlpha2Beta1Flat(SpecialFirstLayerMapComposite):
     '''
     def __init__(self, epsilon=1e-6, zero_params=None, canonizers=None):
         rule_kwargs = {'zero_params': zero_params}
-        layer_map = LAYER_MAP_BASE + [
+        layer_map = layer_map_base(epsilon) + [
             (Convolution, AlphaBeta(alpha=2, beta=1, **rule_kwargs)),
             (torch.nn.Linear, Epsilon(epsilon=epsilon, **rule_kwargs)),
         ]

@@ -18,10 +18,40 @@
 '''Rules based on Hooks'''
 import torch
 
-from .core import Hook, BasicHook, stabilize, expand, zero_wrap
+from .core import Hook, BasicHook, expand, zero_wrap
 
 
 zero_bias = zero_wrap('bias')
+
+
+def make_stabilizer(value):
+    '''Given a value, return a stabilizer. If ``value`` is a float, a Stabilizer with that epsilon ``value`` is returned. If
+    ``value`` is a dict, it will be used as keyword arguments for a new Stabilizer. If ``value`` is callable, it will be used
+    directly as a stabilizer. Otherwise a TypeError will be raised.
+
+    Parameters
+    ----------
+    value: float, dict or vallable
+        The value used to produce a valid stabilizer function.
+
+    Returns
+    -------
+    callable or Stabilizer
+        A callable to be used as a stabilizer.
+
+    Raises
+    ------
+    TypeError
+        If no valid stabilizer could be produced from ``value``.
+    '''
+    if isinstance(value, float):
+        return Stabilizer(epsilon=value)
+    if isinstance(value, dict):
+        return Stabilizer(**value)
+    if callable(value):
+        return value
+    raise TypeError(f'Value {value} is not a valid stabilizer!')
+
 
 
 class Epsilon(BasicHook):
@@ -37,11 +67,12 @@ class Epsilon(BasicHook):
         Stabilization parameter.
     '''
     def __init__(self, epsilon=1e-6, zero_params=None):
+        stabilize = make_stabilizer(epsilon)
         super().__init__(
             input_modifiers=[lambda input: input],
             param_modifiers=[lambda param, _: param],
             output_modifiers=[lambda output: output],
-            gradient_mapper=(lambda out_grad, outputs: out_grad / stabilize(outputs[0], epsilon)),
+            gradient_mapper=(lambda out_grad, outputs: out_grad / stabilize(outputs[0])),
             reducer=(lambda inputs, gradients: inputs[0] * gradients[0]),
             zero_params=zero_params,
         )
@@ -55,7 +86,8 @@ class Gamma(BasicHook):
     gamma: float, optional
         Multiplier for added positive weights.
     '''
-    def __init__(self, gamma=0.25, zero_params=None):
+    def __init__(self, gamma=0.25, epsilon=1e-6, zero_params=None):
+        stabilize = make_stabilizer(epsilon)
         super().__init__(
             input_modifiers=[lambda input: input],
             param_modifiers=[lambda param, _: param + gamma * param.clamp(min=0)],
@@ -76,7 +108,8 @@ class ZPlus(BasicHook):
     :cite:p:`montavon2017explaining` only considers positive inputs, as they are used in ReLU Networks.
     This implementation is effectively alpha=1, beta=0, where negative inputs are allowed.
     '''
-    def __init__(self, zero_params=None):
+    def __init__(self, epsilon=1e-6, zero_params=None):
+        stabilize = make_stabilizer(epsilon)
         super().__init__(
             input_modifiers=[
                 lambda input: input.clamp(min=0),
@@ -106,11 +139,12 @@ class AlphaBeta(BasicHook):
     beta: float, optional
         Multiplier for the negative output term.
     '''
-    def __init__(self, alpha=2., beta=1., zero_params=None):
+    def __init__(self, alpha=2., beta=1., epsilon=1e-6, zero_params=None):
         if alpha < 0 or beta < 0:
             raise ValueError("Both alpha and beta parameters must be positive!")
         if (alpha - beta) != 1.:
             raise ValueError("The difference of parameters alpha - beta must equal 1!")
+        stabilize = make_stabilizer(epsilon)
 
         super().__init__(
             input_modifiers=[
@@ -159,9 +193,11 @@ class ZBox(BasicHook):
     high: :py:class:`torch.Tensor` or float
         Highest pixel values of input. Subject to broadcasting.
     '''
-    def __init__(self, low, high, zero_params=None):
+    def __init__(self, low, high, epsilon=1e-6, zero_params=None):
         def sub(positive, *negatives):
             return positive - sum(negatives)
+
+        stabilize = make_stabilizer(epsilon)
 
         super().__init__(
             input_modifiers=[
@@ -197,7 +233,8 @@ class Norm(BasicHook):
     epsilon only used as a stabilizer, and without the need of the attached layer to have parameters ``weight`` and
     ``bias``.
     '''
-    def __init__(self):
+    def __init__(self, epsilon=1e-6):
+        stabilize = make_stabilizer(epsilon)
         super().__init__(
             input_modifiers=[lambda input: input],
             param_modifiers=[None],
@@ -212,7 +249,8 @@ class WSquare(BasicHook):
     '''LRP WSquare rule :cite:p:`montavon2017explaining`.
     It is most commonly used in the first layer when the values are not bounded :cite:p:`montavon2019layer`.
     '''
-    def __init__(self, zero_params=None):
+    def __init__(self, epsilon=1e-6, zero_params=None):
+        stabilize = make_stabilizer(epsilon)
         super().__init__(
             input_modifiers=[torch.ones_like],
             param_modifiers=[lambda param, _: param ** 2],
@@ -227,7 +265,8 @@ class Flat(BasicHook):
     '''LRP Flat rule :cite:p:`lapuschkin2019unmasking`.
     It is essentially the same as the LRP :py:class:`~zennit.rules.WSquare` rule, but with all parameters set to ones.
     '''
-    def __init__(self, zero_params=None):
+    def __init__(self, epsilon=1e-6, zero_params=None):
+        stabilize = make_stabilizer(epsilon)
         super().__init__(
             input_modifiers=[torch.ones_like],
             param_modifiers=[
