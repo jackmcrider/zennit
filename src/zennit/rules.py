@@ -57,12 +57,33 @@ class Gamma(BasicHook):
     '''
     def __init__(self, gamma=0.25, zero_params=None):
         super().__init__(
-            input_modifiers=[lambda input: input],
-            param_modifiers=[lambda param, _: param + gamma * param.clamp(min=0)],
-            output_modifiers=[lambda output: output],
-            gradient_mapper=(lambda out_grad, outputs: out_grad / stabilize(outputs[0])),
-            reducer=(lambda inputs, gradients: inputs[0] * gradients[0]),
-            zero_params=zero_params,
+            input_modifiers=[
+                lambda input: input.clamp(min=0),
+                lambda input: input.clamp(max=0),
+                lambda input: input.clamp(min=0),
+                lambda input: input.clamp(max=0),
+                lambda input: input,
+            ],
+            param_modifiers=[
+                lambda param, _: param + gamma * param.clamp(min=0),
+                zero_bias(lambda param, _: param + gamma * param.clamp(max=0)),
+                lambda param, _: param + gamma * param.clamp(max=0),
+                zero_bias(lambda param, _: param + gamma * param.clamp(min=0)),
+                lambda param, _: param,
+            ],
+            output_modifiers=[lambda output: output] * 5,
+            gradient_mapper=(
+                lambda out_grad, outputs: [
+                    output * out_grad / stabilize(denom)
+                    for output, denom in (
+                        [(outputs[4] > 0., sum(outputs[:2]))] * 2
+                        + [(outputs[4] < 0., sum(outputs[2:4]))] * 2
+                    )
+                ] + [torch.zeros_like(out_grad)]
+            ),
+            reducer=(
+                lambda inputs, gradients: sum(input * gradient for input, gradient in zip(inputs[:4], gradients[:4]))
+            ),
         )
 
 
@@ -129,7 +150,7 @@ class AlphaBeta(BasicHook):
             gradient_mapper=(
                 lambda out_grad, outputs: [
                     out_grad / stabilize(denom)
-                    for output, denom in zip(outputs, [sum(outputs[:2])] * 2 + [sum(outputs[2:])] * 2)
+                    for denom in ([sum(outputs[:2])] * 2 + [sum(outputs[2:])] * 2)
                 ]
             ),
             reducer=(
