@@ -34,3 +34,11 @@ class Sum(torch.nn.Module):
     def forward(self, input):
         '''Computes the sum along a dimension.'''
         return torch.sum(input, dim=self.dim)
+
+class KMeans(torch.nn.Module):
+    def __init__(self, centroids):
+        super().__init__()
+        self.centroids = torch.nn.Parameter(centroids)
+
+    def forward(self, input):
+        return torch.argmin(torch.cdist(input, self.centroids), dim=-1)
