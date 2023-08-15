@@ -17,6 +17,7 @@
 # along with this library. If not, see <https://www.gnu.org/licenses/>.
 '''Type definitions for convenience.'''
 import torch
+import layer
 
 
 class SubclassMeta(type):
@@ -123,4 +124,11 @@ class Activation(metaclass=SubclassMeta):
         torch.nn.modules.activation.Tanh,
         torch.nn.modules.activation.Tanhshrink,
         torch.nn.modules.activation.Threshold,
+    )
+
+
+class KMeans(metaclass=SubclassMeta):
+    '''Abstract base class that describes k-means modules.'''
+    __subclass__ = (
+        layer.KMeans,
     )
