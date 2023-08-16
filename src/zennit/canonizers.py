@@ -19,15 +19,18 @@
 from abc import ABCMeta, abstractmethod
 
 import torch
+import copy
 
 from .core import collect_leaves
-from .types import Linear, BatchNorm, ConvolutionTranspose
+from .types import Linear, BatchNorm, ConvolutionTranspose, Distance
+from .layer import NeuralizedKMeans, LogMeanExpPool
 
 
 class Canonizer(metaclass=ABCMeta):
     '''Canonizer Base class.
     Canonizers modify modules temporarily such that certain attribution rules can properly be applied.
     '''
+
     @abstractmethod
     def apply(self, root_module):
         '''Apply this canonizer recursively on all applicable modules.
@@ -59,12 +62,8 @@ class Canonizer(metaclass=ABCMeta):
 
 class MergeBatchNorm(Canonizer):
     '''Abstract Canonizer to merge the parameters of batch norms into linear modules.'''
-    linear_type = (
-        Linear,
-    )
-    batch_norm_type = (
-        BatchNorm,
-    )
+    linear_type = (Linear, )
+    batch_norm_type = (BatchNorm, )
 
     def __init__(self):
         super().__init__()
@@ -88,10 +87,12 @@ class MergeBatchNorm(Canonizer):
         self.linears = linears
         self.batch_norm = batch_norm
 
-        self.linear_params = [(linear.weight, linear.bias) for linear in linears]
+        self.linear_params = [(linear.weight, linear.bias)
+                              for linear in linears]
 
         self.batch_norm_params = {
-            key: getattr(self.batch_norm, key) for key in ('weight', 'bias', 'running_mean', 'running_var', 'eps')
+            key: getattr(self.batch_norm, key)
+            for key in ('weight', 'bias', 'running_mean', 'running_var', 'eps')
         }
 
         self.merge_batch_norm(self.linears, self.batch_norm)
@@ -120,28 +121,32 @@ class MergeBatchNorm(Canonizer):
             Batch Normalization module with mandatory attributes `running_mean`, `running_var`, `weight`, `bias` and
             `eps`
         '''
-        denominator = (batch_norm.running_var + batch_norm.eps) ** .5
+        denominator = (batch_norm.running_var + batch_norm.eps)**.5
         scale = batch_norm.weight / denominator
 
         for module in modules:
             if module.bias is None:
                 object.__setattr__(
-                    module, 'bias', torch.zeros(1, device=module.weight.device, dtype=module.weight.dtype)
-                )
+                    module, 'bias',
+                    torch.zeros(1,
+                                device=module.weight.device,
+                                dtype=module.weight.dtype))
 
-            index = (slice(None), *((None,) * (module.weight.ndim - 1)))
+            index = (slice(None), *((None, ) * (module.weight.ndim - 1)))
             if isinstance(module, ConvolutionTranspose):
                 index = index[1::-1] + index[2:]
 
             # merge batch_norm into linear layer
             object.__setattr__(module, 'weight', module.weight * scale[index])
-            object.__setattr__(module, 'bias', (module.bias - batch_norm.running_mean) * scale + batch_norm.bias)
+            object.__setattr__(
+                module, 'bias',
+                (module.bias - batch_norm.running_mean) * scale +
+                batch_norm.bias)
 
         # change batch_norm parameters to produce identity
         for key, func in zip(
             ('running_mean', 'running_var', 'bias', 'weight', 'eps'),
-            (*(torch.zeros_like, torch.ones_like) * 2, lambda _: 0.)
-        ):
+            (*(torch.zeros_like, torch.ones_like) * 2, lambda _: 0.)):
             object.__setattr__(batch_norm, key, func(getattr(batch_norm, key)))
 
 
@@ -157,6 +162,7 @@ class SequentialMergeBatchNorm(MergeBatchNorm):
     to properly detect when there is an activation function between linear and batch-norm modules.
 
     '''
+
     def apply(self, root_module):
         '''Finds a batch norm following right after a linear layer, and creates a copy of this instance to merge
         them by fusing the batch norm parameters into the linear layer and reducing the batch norm to the identity.
@@ -175,9 +181,10 @@ class SequentialMergeBatchNorm(MergeBatchNorm):
         instances = []
         last_leaf = None
         for leaf in collect_leaves(root_module):
-            if isinstance(last_leaf, self.linear_type) and isinstance(leaf, self.batch_norm_type):
+            if isinstance(last_leaf, self.linear_type) and isinstance(
+                    leaf, self.batch_norm_type):
                 instance = self.copy()
-                instance.register((last_leaf,), leaf)
+                instance.register((last_leaf, ), leaf)
                 instances.append(instance)
             last_leaf = leaf
 
@@ -192,6 +199,7 @@ class NamedMergeBatchNorm(MergeBatchNorm):
     name_map: list[tuple[string], string]
         List of which linear layer names belong to which batch norm name.
     '''
+
     def __init__(self, name_map):
         super().__init__()
         self.name_map = name_map
@@ -214,7 +222,8 @@ class NamedMergeBatchNorm(MergeBatchNorm):
 
         for linear_names, batch_norm_name in self.name_map:
             instance = self.copy()
-            instance.register([lookup[name] for name in linear_names], lookup[batch_norm_name])
+            instance.register([lookup[name] for name in linear_names],
+                              lookup[batch_norm_name])
             instances.append(instance)
 
         return instances
@@ -234,6 +243,7 @@ class AttributeCanonizer(Canonizer):
         overload for a module. The function signature is (name: string, module: type) -> None or
         dict.
     '''
+
     def __init__(self, attribute_map):
         self.attribute_map = attribute_map
         self.attribute_keys = None
@@ -303,6 +313,7 @@ class CompositeCanonizer(Canonizer):
     canonizers : list of :py:obj:`Canonizer`
         Canonizers of which to build a Composite of.
     '''
+
     def __init__(self, canonizers):
         self.canonizers = canonizers
 
@@ -329,3 +340,66 @@ class CompositeCanonizer(Canonizer):
 
     def remove(self):
         '''Remove this Canonizer. Nothing to do for a CompositeCanonizer.'''
+
+
+class KMeansCanonizer(Canonizer):
+
+    def __init__(self, beta=-1.):
+        self.distance = None
+        self.distance_unchanged = None
+        self.beta = beta
+
+    def apply(self, root_module):
+        """Find Distance layer with power 2 and replace it with a NeuralizedKMeans layer followed by a LogMeanExpPool layer.
+
+        :param root_module: Root module with a Distance layer somewhere in the architecture.
+        :returns: Canonizer instances
+
+        """
+        instances = []
+
+        for full_name, module in root_module.named_modules():
+            if isinstance(module, Distance) and module.power == 2:
+                instance = self.copy()
+                if '.' in full_name:
+                    parent_name, child_name = full_name.rsplit('.', 1)
+                    parent_module = getattr(root_module, parent_name)
+                else:
+                    parent_module = root_module
+                    child_name = full_name
+
+                instance.parent_module = parent_module
+                instance.child_name = child_name
+
+                instance.register(module)
+                instances.append(instance)
+
+        return instances
+
+    def register(self, distance_module):
+        """Register the Distance layer and replace it with a NeuralizedKMeans layer followed by a LogMeanExpPool layer.
+
+        :param distance_module: Distance layer to replace.
+        """
+        self.distance = distance_module
+        self.distance_unchanged = copy.deepcopy(self.distance)
+
+        K, D = self.distance.centroids.shape
+        mask = ~torch.eye(K, dtype=bool)
+        W = 2 * (self.distance.centroids[:, None, :] -
+                 self.distance.centroids[None, :, :])[mask].reshape(
+                     K, K - 1, D)
+        norms = torch.norm(self.distance.centroids, dim=-1)
+        b = (norms[None, :]**2 - norms[:, None]**2)[mask].reshape(K, K - 1)
+        setattr(
+            self.parent_module, self.child_name,
+            torch.nn.Sequential(NeuralizedKMeans(W, b),
+                                LogMeanExpPool(self.beta)))
+
+    def remove(self):
+        """Revert the changes introduced by this canonizer."""
+        setattr(self.parent_module, self.child_name, self.distance_unchanged)
+
+    def copy(self):
+        """Return a copy of this instance."""
+        return KMeansCanonizer(self.beta)
