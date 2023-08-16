@@ -19,9 +19,11 @@
 from abc import ABCMeta, abstractmethod
 
 import torch
+import copy
 
 from .core import collect_leaves
-from .types import Linear, BatchNorm, ConvolutionTranspose
+from .types import Linear, BatchNorm, ConvolutionTranspose, Distance
+from .layer import NeuralizedKMeans, LogMeanExpPool
 
 
 class Canonizer(metaclass=ABCMeta):
@@ -329,3 +331,66 @@ class CompositeCanonizer(Canonizer):
 
     def remove(self):
         '''Remove this Canonizer. Nothing to do for a CompositeCanonizer.'''
+
+
+class KMeansCanonizer(Canonizer):
+
+    def __init__(self, beta=-1.):
+        self.distance = None
+        self.distance_unchanged = None
+        self.beta = beta
+
+    def apply(self, root_module):
+        """Find Distance layer with power 2 and replace it with a NeuralizedKMeans layer followed by a LogMeanExpPool layer.
+
+        :param root_module: Root module with a Distance layer somewhere in the architecture.
+        :returns: Canonizer instances
+
+        """
+        instances = []
+
+        for full_name, module in root_module.named_modules():
+            if isinstance(module, Distance) and module.power == 2:
+                instance = self.copy()
+                if '.' in full_name:
+                    parent_name, child_name = full_name.rsplit('.', 1)
+                    parent_module = getattr(root_module, parent_name)
+                else:
+                    parent_module = root_module
+                    child_name = full_name
+
+                instance.parent_module = parent_module
+                instance.child_name = child_name
+
+                instance.register(module)
+                instances.append(instance)
+
+        return instances
+
+    def register(self, distance_module):
+        """Register the Distance layer and replace it with a NeuralizedKMeans layer followed by a LogMeanExpPool layer.
+
+        :param distance_module: Distance layer to replace.
+        """
+        self.distance = distance_module
+        self.distance_unchanged = copy.deepcopy(self.distance)
+
+        K, D = self.distance.centroids.shape
+        mask = ~torch.eye(K, dtype=bool)
+        W = 2 * (self.distance.centroids[:, None, :] -
+                 self.distance.centroids[None, :, :])[mask].reshape(
+                     K, K - 1, D)
+        norms = torch.norm(self.distance.centroids, dim=-1)
+        b = (norms[None, :]**2 - norms[:, None]**2)[mask].reshape(K, K - 1)
+        setattr(
+            self.parent_module, self.child_name,
+            torch.nn.Sequential(NeuralizedKMeans(W, b),
+                                LogMeanExpPool(self.beta)))
+
+    def remove(self):
+        """Revert the changes introduced by this canonizer."""
+        setattr(self.parent_module, self.child_name, self.distance_unchanged)
+
+    def copy(self):
+        """Return a copy of this instance."""
+        return KMeansCanonizer(self.beta)
