@@ -36,10 +36,12 @@ class Sum(torch.nn.Module):
         return torch.sum(input, dim=self.dim)
 
 
-class KMeans(torch.nn.Module):
-    def __init__(self, centroids):
+class Distance(torch.nn.Module):
+    '''Compute distance between inputs and centroids.'''
+    def __init__(self, centroids, power=2):
         super().__init__()
         self.centroids = torch.nn.Parameter(centroids)
+        self.power = power
 
     def forward(self, input):
         """Computes the nearest centroid for each input.
@@ -48,4 +50,5 @@ class KMeans(torch.nn.Module):
         :returns: Index of nearest centroid
 
         """
-        return torch.argmin(torch.cdist(input, self.centroids)**2, dim=-1)
+        distance = torch.cdist(input, self.centroids)**self.power
+        return distance

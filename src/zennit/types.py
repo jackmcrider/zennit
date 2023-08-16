@@ -17,7 +17,7 @@
 # along with this library. If not, see <https://www.gnu.org/licenses/>.
 '''Type definitions for convenience.'''
 import torch
-import layer
+from .layer import Distance as DistanceLayer
 
 
 class SubclassMeta(type):
@@ -127,8 +127,8 @@ class Activation(metaclass=SubclassMeta):
     )
 
 
-class KMeans(metaclass=SubclassMeta):
-    '''Abstract base class that describes k-means modules.'''
+class Distance(metaclass=SubclassMeta):
+    '''Abstract base class that describes distance modules.'''
     __subclass__ = (
-        layer.KMeans,
+        DistanceLayer,
     )
