@@ -52,3 +52,34 @@ class Distance(torch.nn.Module):
         """
         distance = torch.cdist(input, self.centroids)**self.power
         return distance
+
+
+class NeuralizedKMeans(torch.nn.Module):
+    '''Neuralized K-Means layer. Actually a tensor-matrix product.'''
+    def __init__(self, W, b):
+        super().__init__()
+        self.W = torch.nn.Parameter(W)
+        self.b = torch.nn.Parameter(b)
+
+    def forward(self, x):
+        x = torch.einsum('nd,kjd->nkj', x, self.W) + self.b
+        return x
+
+
+class LogMeanExpPool(torch.nn.Module):
+    """Computes the log mean exp pooling.
+
+    :param beta: scaling parameter
+    :param dim: dimension over which to pool
+    :returns: log mean exp pooled tensor
+
+    """
+    def __init__(self, beta=1., dim=-1):
+        super().__init__()
+        self.dim = dim
+        self.beta = beta
+
+    def forward(self, input):
+        N = input.shape[self.dim]
+        return (torch.logsumexp(self.beta * input, dim=self.dim) -
+                torch.log(torch.tensor(N, dtype=input.dtype))) / self.beta
