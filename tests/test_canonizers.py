@@ -8,9 +8,10 @@ from torch.nn import Sequential
 from helpers import assert_identity_hook
 
 from zennit.canonizers import Canonizer, CompositeCanonizer
-from zennit.canonizers import SequentialMergeBatchNorm, NamedMergeBatchNorm, AttributeCanonizer
+from zennit.canonizers import SequentialMergeBatchNorm, NamedMergeBatchNorm, AttributeCanonizer, KMeansCanonizer
 from zennit.core import RemovableHandleList
 from zennit.types import BatchNorm
+from zennit.layer import KMeans
 
 
 def test_merge_batchnorm_consistency(module_linear, module_batchnorm, data_linear):
