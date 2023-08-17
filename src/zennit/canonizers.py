@@ -334,19 +334,41 @@ class CompositeCanonizer(Canonizer):
 
 
 class KMeansCanonizer(Canonizer):
+    '''Canonizer for k-means.
 
+    This canonizer replaces a :py:obj:`Distance` layer with power 2 with a :py:obj:`NeuralizedKMeans` layer followed by a :py:obj:`LogMeanExpPool`
+
+    Parameters
+    ----------
+    beta : float
+        stiffness of the :py:obj:`LogMeanExpPool` layer. Should be smaller than 0 in order to approximate the min function.
+        Default is -1.
+
+    Examples
+    --------
+    >>> from sklearn.cluster import KMeans
+    >>> centroids = KMeans(n_clusters=10).fit(X).cluster_centers_
+    >>> model = torch.nn.Sequential(Distance(torch.from_numpy(centroids).float(), power=2))
+    >>> cluster_assignment = model(x).argmin()
+    >>> canonizer = KMeansCanonizer(beta=-1.)
+    >>> with Gradient(model, canonizer=[canonizer]) as attributor:
+    >>>    output, attribution = attributor(x, torch.eye(len(centroids))[[cluster_assignment]])
+    '''
     def __init__(self, beta=-1.):
         self.distance = None
         self.distance_unchanged = None
         self.beta = beta
 
     def apply(self, root_module):
-        """Find Distance layer with power 2 and replace it with a NeuralizedKMeans layer followed by a LogMeanExpPool layer.
+        '''Apply this canonizer recursively on all applicable modules.
 
-        :param root_module: Root module with a Distance layer somewhere in the architecture.
-        :returns: Canonizer instances
+        Iterates over all modules of the root module and applies this canonizer to all :py:obj:`Distance` layers with power 2.
 
-        """
+        Parameters
+        ----------
+        root_module : :py:obj:`torch.nn.Module`
+            Root module containing a :py:obj:`Distance` layer with power 2 as a submodule.
+        '''
         instances = []
 
         for full_name, module in root_module.named_modules():
@@ -368,29 +390,37 @@ class KMeansCanonizer(Canonizer):
         return instances
 
     def register(self, distance_module):
-        """Register the Distance layer and replace it with a NeuralizedKMeans layer followed by a LogMeanExpPool layer.
+        '''Register the :py:obj:`Distance` layer and replace it with a :py:obj:`NeuralizedKMeans` layer followed by a
+        :py:obj:`LogMeanExpPool` layer.
 
-        :param distance_module: Distance layer to replace.
-        """
+        compute :math:`w_{ck} = 2(\\mathbf{\\mu}_c - \\mathbf{\\mu}_k)` and :math:`b_{ck} = \\|\\mathbf{\\mu}_k\\|^2 -
+        \\|\\mathbf{\\mu}_c\\|^2`. Weights are stored in a tensor :math:`W \\in \\mathbb{R}^{K \\times (K - 1)
+        \\times D}` and biases in a vector :math:`b \\in \\mathbb{R}^{K \\times (K - 1)}`.
+
+        A :py:obj:`NeuralizedKMeans` layer is created with these weights and biases. The :py:obj:`LogMeanExpPool` layer
+        is created with the beta value supplied to the constructor.
+
+        Parameters
+        ----------
+        distance_module : list of :py:obj:`Distance`
+            Distance layers to replace.
+        '''
         self.distance = distance_module
         self.distance_unchanged = copy.deepcopy(self.distance)
 
-        K, D = self.distance.centroids.shape
-        mask = ~torch.eye(K, dtype=bool)
-        W = 2 * (self.distance.centroids[:, None, :] -
-                 self.distance.centroids[None, :, :])[mask].reshape(
-                     K, K - 1, D)
+        n_clusters, n_dims = self.distance.centroids.shape
+        mask = ~torch.eye(n_clusters, dtype=bool)
+        weight = 2 * (self.distance.centroids[:, None, :] - self.distance.centroids[None, :, :])
+        weight = weight[mask].reshape(n_clusters, n_clusters - 1, n_dims)
         norms = torch.norm(self.distance.centroids, dim=-1)
-        b = (norms[None, :]**2 - norms[:, None]**2)[mask].reshape(K, K - 1)
-        setattr(
-            self.parent_module, self.child_name,
-            torch.nn.Sequential(NeuralizedKMeans(W, b),
-                                LogMeanExpPool(self.beta)))
+        bias = (norms[None, :]**2 - norms[:, None]**2)[mask].reshape(n_clusters, n_clusters - 1)
+        setattr(self.parent_module, self.child_name,
+                torch.nn.Sequential(NeuralizedKMeans(weight, bias),
+                                    LogMeanExpPool(self.beta)))
 
     def remove(self):
         """Revert the changes introduced by this canonizer."""
         setattr(self.parent_module, self.child_name, self.distance_unchanged)
 
     def copy(self):
-        """Return a copy of this instance."""
         return KMeansCanonizer(self.beta)
